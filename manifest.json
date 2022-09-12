@@ -1,0 +1,20 @@
+{
+
+  "description": "Change video playback rate",
+  "manifest_version": 2,
+  "name": "Plex Firefox Extension",
+  "version": "1.0",
+  "homepage_url": "https://github.com/clocktower39",
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "matt@mattkearns.dev"
+    }
+  },
+  "content_scripts": [
+    {
+      "matches": ["*://app.plex.tv/*"],
+      "js": ["playbackRate.js"]
+    }
+  ]
+
+}
