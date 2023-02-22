@@ -1,6 +1,6 @@
 {
 
-  "description": "Change video playback rate",
+  "description": "Change video playback rate and auto skip Intros",
   "manifest_version": 2,
   "name": "Plex Firefox Extension",
   "version": "1.0",
@@ -13,7 +13,7 @@
   "content_scripts": [
     {
       "matches": ["*://app.plex.tv/*"],
-      "js": ["playbackRate.js"]
+      "js": ["playbackRate.js", "autoSkip.js"]
     }
   ]
 
