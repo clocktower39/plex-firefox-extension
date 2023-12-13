@@ -1,11 +1,15 @@
 // Add speed slider controls
-const addSpeedSlider = () => {
+const addFeatures = () => {
   const controlContainer = document.querySelector('[data-testid="playerControlsContainer"] > div:nth-child(2)');
   const targetVideo = document.querySelector('video');
 
   if (!controlContainer || !targetVideo) {
     return;
   }
+
+  const addedFeatureContainer = document.createElement('div');
+  addedFeatureContainer.style.padding = '0px 5px';
+  controlContainer?.appendChild(addedFeatureContainer);
 
   const rangeInput = document.createElement('input');
   const speedLabel = document.createElement('label');
@@ -22,10 +26,48 @@ const addSpeedSlider = () => {
     targetVideo.playbackRate = rangeInput.value;
   });
 
-  controlContainer.appendChild(speedLabel);
-  controlContainer.appendChild(rangeInput);
+  
+  // Create and append the skip intro checkbox
+  const skipIntroCheckbox = createCheckbox("skip-intro-checkbox", "Intro", true);
+  addedFeatureContainer.appendChild(skipIntroCheckbox);
+  
+  // Create and append the skip credits checkbox
+  const skipCreditsCheckbox = createCheckbox("skip-credits-checkbox", "Credits", false);
+  addedFeatureContainer.appendChild(skipCreditsCheckbox);
+
+  addedFeatureContainer.appendChild(speedLabel);
+  addedFeatureContainer.appendChild(rangeInput);
+
+
   console.log('speed slider added');
 }
+
+// Function to create and append a checkbox
+function createCheckbox(id, label, defaultChecked) {
+  const checkboxContainer = document.createElement("div");
+  const checkbox = document.createElement("input");
+  const checkboxLabel = document.createElement("label");
+
+  checkbox.type = "checkbox";
+  checkbox.id = id;
+  checkbox.checked = defaultChecked;
+  checkboxLabel.htmlFor = id;
+  checkboxLabel.innerText = label;
+
+  checkboxContainer.appendChild(checkbox);
+  checkboxContainer.appendChild(checkboxLabel);
+  
+  // Apply initial visibility based on current window width
+  checkboxContainer.style.display = window.innerWidth >= 960 ? "" : "none";
+
+  // Event listener to adjust visibility on window resize
+  window.addEventListener('resize', () => {
+    checkboxContainer.style.display = window.innerWidth >= 960 ? "" : "none";
+  });
+
+  return checkboxContainer;
+}
+
 
 // use Mutation Observer to detect when speed slider needs to be appended
 const onClassChange = (element, callback) => {
@@ -43,7 +85,7 @@ const onClassChange = (element, callback) => {
 const itemToWatch = document.querySelector('.application');
 const disconnectObserver = onClassChange(itemToWatch, node => {
   if (!document.getElementById('speed-control')) {
-    addSpeedSlider();
+    addFeatures();
   }
 });
 
