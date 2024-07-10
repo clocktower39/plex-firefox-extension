@@ -12,9 +12,13 @@
   },
   "content_scripts": [
     {
-      "matches": ["*://app.plex.tv/*"],
+      "matches": ["*://app.plex.tv/*","*://127.0.0.1/*"],
       "js": ["playbackRate.js", "autoSkip.js"]
     }
+  ],
+  "permissions": [
+    "activeTab",
+    "*://127.0.0.1:32400/*",
+    "*://app.plex.tv/*"
   ]
-
 }
