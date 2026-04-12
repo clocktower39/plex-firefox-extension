@@ -1,4 +1,14 @@
 (() => {
+  const SETTINGS_DATASET_KEYS = {
+    skipIntroEnabled: 'plexSkipIntroEnabled',
+    skipCreditsEnabled: 'plexSkipCreditsEnabled'
+  };
+
+  const DEFAULT_SETTINGS = {
+    [SETTINGS_DATASET_KEYS.skipIntroEnabled]: true,
+    [SETTINGS_DATASET_KEYS.skipCreditsEnabled]: true
+  };
+
   const isSupportedPlexPage = () => {
     const { hostname, port } = window.location;
     return hostname === 'app.plex.tv' || port === '32400';
@@ -7,6 +17,22 @@
   if (!isSupportedPlexPage()) {
     return;
   }
+
+  const getSetting = key => {
+    const existingValue = document.documentElement.dataset[key];
+
+    if (existingValue === undefined) {
+      const defaultValue = DEFAULT_SETTINGS[key];
+      document.documentElement.dataset[key] = String(defaultValue);
+      return defaultValue;
+    }
+
+    return existingValue === 'true';
+  };
+
+  const setSetting = (key, value) => {
+    document.documentElement.dataset[key] = String(value);
+  };
 
   // Add speed slider controls
   const addFeatures = () => {
@@ -30,18 +56,29 @@
     rangeInput.min = 1;
     rangeInput.max = 10;
     rangeInput.value = targetVideo.playbackRate;
+    speedLabel.textContent = `${targetVideo.playbackRate}x`;
 
     rangeInput.addEventListener('input', () => {
-      speedLabel.value = rangeInput.value;
+      speedLabel.textContent = `${rangeInput.value}x`;
       targetVideo.playbackRate = rangeInput.value;
     });
 
     // Create and append the skip intro checkbox
-    const skipIntroCheckbox = createCheckbox('skip-intro-checkbox', 'Intro', true);
+    const skipIntroCheckbox = createCheckbox(
+      'skip-intro-checkbox',
+      'Intro',
+      DEFAULT_SETTINGS[SETTINGS_DATASET_KEYS.skipIntroEnabled],
+      SETTINGS_DATASET_KEYS.skipIntroEnabled
+    );
     addedFeatureContainer.appendChild(skipIntroCheckbox);
 
     // Create and append the skip credits checkbox
-    const skipCreditsCheckbox = createCheckbox('skip-credits-checkbox', 'Credits', false);
+    const skipCreditsCheckbox = createCheckbox(
+      'skip-credits-checkbox',
+      'Credits',
+      DEFAULT_SETTINGS[SETTINGS_DATASET_KEYS.skipCreditsEnabled],
+      SETTINGS_DATASET_KEYS.skipCreditsEnabled
+    );
     addedFeatureContainer.appendChild(skipCreditsCheckbox);
 
     addedFeatureContainer.appendChild(speedLabel);
@@ -49,16 +86,22 @@
   };
 
   // Function to create and append a checkbox
-  function createCheckbox(id, label, defaultChecked) {
+  function createCheckbox(id, label, defaultChecked, settingKey) {
     const checkboxContainer = document.createElement('div');
     const checkbox = document.createElement('input');
     const checkboxLabel = document.createElement('label');
 
     checkbox.type = 'checkbox';
     checkbox.id = id;
-    checkbox.checked = defaultChecked;
+    checkbox.checked = settingKey ? getSetting(settingKey) : defaultChecked;
     checkboxLabel.htmlFor = id;
     checkboxLabel.innerText = label;
+
+    if (settingKey) {
+      checkbox.addEventListener('change', () => {
+        setSetting(settingKey, checkbox.checked);
+      });
+    }
 
     checkboxContainer.appendChild(checkbox);
     checkboxContainer.appendChild(checkboxLabel);
