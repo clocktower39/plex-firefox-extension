@@ -266,6 +266,7 @@
 
   let currentLibrary = readSessionValue(CURRENT_LIBRARY_SESSION_KEY, isLibraryShape);
   let pendingRatingKey = null;
+  let lastLookupFailed = false;
 
   const libraryByRatingKey = new Map();
 
@@ -335,25 +336,35 @@
     return library;
   };
 
-  const applyLibrary = library => {
+  const applyLibrary = (library, ratingKey) => {
     if (!library) {
       return;
     }
 
-    const changed = !currentLibrary || currentLibrary.key !== library.key || currentLibrary.name !== library.name;
+    const resolved = { key: library.key, name: library.name, ratingKey };
+    const changed = !currentLibrary || currentLibrary.key !== resolved.key || currentLibrary.name !== resolved.name;
 
-    currentLibrary = library;
-    writeSessionValue(CURRENT_LIBRARY_SESSION_KEY, library);
+    currentLibrary = resolved;
+    writeSessionValue(CURRENT_LIBRARY_SESSION_KEY, resolved);
 
     // Keep the stored label in step with a library that was renamed in Plex.
-    const saved = store.libraries[library.key];
-    if (saved && library.name && saved.name !== library.name) {
-      saved.name = library.name;
+    const saved = store.libraries[resolved.key];
+    if (saved && resolved.name && saved.name !== resolved.name) {
+      saved.name = resolved.name;
       persistStore();
     }
 
     if (changed) {
       syncStepToControls();
+    }
+  };
+
+  const forgetCurrentLibrary = () => {
+    currentLibrary = null;
+    try {
+      window.sessionStorage.removeItem(CURRENT_LIBRARY_SESSION_KEY);
+    } catch (error) {
+      // Nothing to clean up.
     }
   };
 
@@ -367,11 +378,13 @@
     const cached = libraryByRatingKey.get(ratingKey);
 
     if (cached) {
-      applyLibrary(cached);
+      lastLookupFailed = false;
+      applyLibrary(cached, ratingKey);
       return;
     }
 
     pendingRatingKey = ratingKey;
+    lastLookupFailed = false;
     syncStepToControls();
 
     const settle = library => {
@@ -381,7 +394,16 @@
 
       // Drop a late response for an item that is no longer on screen.
       if (getRatingKeyFromLocation() === ratingKey) {
-        applyLibrary(library);
+        lastLookupFailed = !library;
+
+        if (library) {
+          applyLibrary(library, ratingKey);
+        } else if (currentLibrary && currentLibrary.ratingKey !== ratingKey) {
+          // We have moved to a different item and cannot say which library it
+          // belongs to. Holding on to the previous one would silently apply
+          // that library's step to unrelated media.
+          forgetCurrentLibrary();
+        }
       }
 
       syncStepToControls();
@@ -397,7 +419,12 @@
       return currentLibrary.name || `Library ${currentLibrary.key.split(':').pop()}`;
     }
 
-    return pendingRatingKey ? 'checking…' : 'not detected';
+    if (pendingRatingKey) {
+      return 'checking…';
+    }
+
+    // Distinguish "the server would not tell us" from "nothing to ask about".
+    return lastLookupFailed ? 'lookup failed' : 'not detected';
   };
 
   // ---------------------------------------------------------------------------
@@ -785,7 +812,24 @@
 
   refreshCurrentLibrary();
 
-  window.addEventListener('hashchange', refreshCurrentLibrary);
+  // Plex Web is a single page app that routes with history.pushState, which
+  // fires neither hashchange nor popstate. Both events are still handled for
+  // the cases that do fire them, but the URL has to be polled to reliably catch
+  // a move to a different show.
+  let lastObservedHref = window.location.href;
+
+  const handleLocationChange = () => {
+    if (window.location.href === lastObservedHref) {
+      return;
+    }
+
+    lastObservedHref = window.location.href;
+    refreshCurrentLibrary();
+  };
+
+  window.addEventListener('hashchange', handleLocationChange);
+  window.addEventListener('popstate', handleLocationChange);
+  window.setInterval(handleLocationChange, 1000);
 
   // Speed controls with number input: key N selects the Nth slider position, so
   // the step setting decides how far apart those speeds are.
