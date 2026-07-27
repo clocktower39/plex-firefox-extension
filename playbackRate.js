@@ -9,6 +9,17 @@
     [SETTINGS_DATASET_KEYS.skipCreditsEnabled]: true
   };
 
+  const STORAGE_KEY = 'plexExtensionSettings';
+  const STORAGE_VERSION = 1;
+  const CURRENT_LIBRARY_SESSION_KEY = 'plexExtensionCurrentLibrary';
+
+  const SPEED_MIN = 1;
+  const SPEED_MAX = 10;
+  const DEFAULT_STEP = 1;
+  const MIN_STEP = 0.05;
+  const MAX_STEP = 1;
+  const HOTKEY_SLOT_COUNT = 9;
+
   const isSupportedPlexPage = () => {
     const { hostname, port } = window.location;
     return hostname === 'app.plex.tv' || port === '32400';
@@ -18,6 +29,100 @@
     return;
   }
 
+  // ---------------------------------------------------------------------------
+  // Persisted settings
+  //
+  // Shape:
+  // {
+  //   version: 1,
+  //   lastStep: 1,                       // most recently chosen step, used when
+  //                                      // the library cannot be detected
+  //   libraries: {                       // per-library overrides
+  //     "<machineId>:<sectionId>": { name: "Educational", step: 0.2 }
+  //   },
+  //   toggles: { plexSkipIntroEnabled: true, plexSkipCreditsEnabled: true }
+  // }
+  // ---------------------------------------------------------------------------
+  const createEmptyStore = () => ({
+    version: STORAGE_VERSION,
+    lastStep: DEFAULT_STEP,
+    libraries: {},
+    toggles: { ...DEFAULT_SETTINGS }
+  });
+
+  const isValidStep = value => {
+    return typeof value === 'number' && isFinite(value) && value >= MIN_STEP && value <= MAX_STEP;
+  };
+
+  const readStore = () => {
+    const store = createEmptyStore();
+
+    let raw = null;
+    try {
+      raw = window.localStorage.getItem(STORAGE_KEY);
+    } catch (error) {
+      return store;
+    }
+
+    if (!raw) {
+      return store;
+    }
+
+    let parsed = null;
+    try {
+      parsed = JSON.parse(raw);
+    } catch (error) {
+      return store;
+    }
+
+    if (!parsed || typeof parsed !== 'object') {
+      return store;
+    }
+
+    if (isValidStep(parsed.lastStep)) {
+      store.lastStep = parsed.lastStep;
+    }
+
+    if (parsed.libraries && typeof parsed.libraries === 'object') {
+      Object.entries(parsed.libraries).forEach(([key, value]) => {
+        if (value && typeof value === 'object' && isValidStep(value.step)) {
+          store.libraries[key] = {
+            name: typeof value.name === 'string' ? value.name : '',
+            step: value.step
+          };
+        }
+      });
+    }
+
+    if (parsed.toggles && typeof parsed.toggles === 'object') {
+      Object.keys(DEFAULT_SETTINGS).forEach(key => {
+        if (typeof parsed.toggles[key] === 'boolean') {
+          store.toggles[key] = parsed.toggles[key];
+        }
+      });
+    }
+
+    return store;
+  };
+
+  const store = readStore();
+
+  const persistStore = () => {
+    try {
+      window.localStorage.setItem(STORAGE_KEY, JSON.stringify(store));
+    } catch (error) {
+      // Storage can be unavailable (private browsing, quota). Settings still
+      // apply for the current page, they just will not survive a reload.
+    }
+  };
+
+  // ---------------------------------------------------------------------------
+  // Auto-skip toggles
+  //
+  // These live on documentElement.dataset because autoSkip.js reads them from
+  // there. Hydrate them synchronously so autoSkip.js — which runs after this
+  // file — sees the persisted values instead of seeding the defaults itself.
+  // ---------------------------------------------------------------------------
   const getSetting = key => {
     const existingValue = document.documentElement.dataset[key];
 
@@ -32,6 +137,457 @@
 
   const setSetting = (key, value) => {
     document.documentElement.dataset[key] = String(value);
+    store.toggles[key] = value;
+    persistStore();
+  };
+
+  Object.keys(DEFAULT_SETTINGS).forEach(key => {
+    document.documentElement.dataset[key] = String(store.toggles[key]);
+  });
+
+  // ---------------------------------------------------------------------------
+  // Session scratch storage (per tab)
+  // ---------------------------------------------------------------------------
+  const readSessionValue = (key, isValid) => {
+    try {
+      const raw = window.sessionStorage.getItem(key);
+      const parsed = raw ? JSON.parse(raw) : null;
+      return isValid(parsed) ? parsed : null;
+    } catch (error) {
+      return null;
+    }
+  };
+
+  const writeSessionValue = (key, value) => {
+    try {
+      window.sessionStorage.setItem(key, JSON.stringify(value));
+    } catch (error) {
+      // Non-fatal: the value just will not survive a route change.
+    }
+  };
+
+  // ---------------------------------------------------------------------------
+  // Plex server connection discovery
+  //
+  // Plex Web has already talked to the server long before the player exists, so
+  // the base URL and access token can be lifted straight out of the resource
+  // timing buffer — no script injection, no page CSP to fight. Only plex.direct
+  // and :32400 origins are ever considered, so the token is never sent anywhere
+  // other than the Plex server that issued it.
+  //
+  // The buffer holds 250 entries by default and Plex Web fills it, so a
+  // PerformanceObserver covers the case where the token-bearing request only
+  // shows up after the buffer is full.
+  // ---------------------------------------------------------------------------
+  const CONNECTION_SESSION_KEY = 'plexExtensionConnection';
+
+  const isPlexServerUrl = url => {
+    return /^https?:\/\/[^/]*\.plex\.direct(:\d+)?\//i.test(url) || /^https?:\/\/[^/]+:32400\//.test(url);
+  };
+
+  const isConnectionShape = value => {
+    return Boolean(value) && typeof value.origin === 'string' && typeof value.token === 'string';
+  };
+
+  let connection = readSessionValue(CONNECTION_SESSION_KEY, isConnectionShape);
+
+  const captureConnectionFromUrl = url => {
+    if (connection || typeof url !== 'string' || !isPlexServerUrl(url) || !/[?&]X-Plex-Token=/i.test(url)) {
+      return;
+    }
+
+    let parsed = null;
+    try {
+      parsed = new URL(url);
+    } catch (error) {
+      return;
+    }
+
+    const token = parsed.searchParams.get('X-Plex-Token');
+
+    if (!token) {
+      return;
+    }
+
+    connection = { origin: parsed.origin, token };
+    writeSessionValue(CONNECTION_SESSION_KEY, connection);
+  };
+
+  const discoverConnection = () => {
+    if (connection) {
+      return connection;
+    }
+
+    try {
+      window.performance.getEntriesByType('resource').forEach(entry => captureConnectionFromUrl(entry.name));
+    } catch (error) {
+      // Resource timing unavailable; the observer below may still find it.
+    }
+
+    return connection;
+  };
+
+  const forgetConnection = () => {
+    connection = null;
+    try {
+      window.sessionStorage.removeItem(CONNECTION_SESSION_KEY);
+    } catch (error) {
+      // Nothing to clean up.
+    }
+  };
+
+  try {
+    const resourceObserver = new PerformanceObserver(entryList => {
+      if (connection) {
+        resourceObserver.disconnect();
+        return;
+      }
+
+      entryList.getEntries().forEach(entry => captureConnectionFromUrl(entry.name));
+    });
+
+    resourceObserver.observe({ type: 'resource', buffered: true });
+  } catch (error) {
+    // PerformanceObserver unsupported; discoverConnection() still covers the
+    // entries already in the buffer.
+  }
+
+  // ---------------------------------------------------------------------------
+  // Library detection
+  //
+  // The player route carries the item, not the library:
+  //   #!/server/<machineId>/details?key=%2Flibrary%2Fmetadata%2F57875
+  // Asking the server for that item's metadata yields librarySectionID and
+  // librarySectionTitle, which works no matter how playback was started —
+  // including straight from Continue Watching, where no library was ever
+  // browsed. The result is cached per tab so route changes keep the context.
+  // ---------------------------------------------------------------------------
+  const isLibraryShape = value => Boolean(value) && typeof value.key === 'string';
+
+  let currentLibrary = readSessionValue(CURRENT_LIBRARY_SESSION_KEY, isLibraryShape);
+  let pendingRatingKey = null;
+
+  const libraryByRatingKey = new Map();
+
+  const getRatingKeyFromLocation = () => {
+    const hash = window.location.hash || '';
+
+    let decoded = hash;
+    try {
+      decoded = decodeURIComponent(hash);
+    } catch (error) {
+      // Malformed escape sequence; fall back to the raw hash.
+    }
+
+    const match = decoded.match(/\/library\/metadata\/(\d+)/);
+    return match ? match[1] : null;
+  };
+
+  const getMachineIdFromLocation = () => {
+    const match = (window.location.hash || '').match(/\/(?:media|server)\/([\w-]+)/);
+    return match ? match[1] : 'unknown';
+  };
+
+  const fetchLibraryForRatingKey = async ratingKey => {
+    if (libraryByRatingKey.has(ratingKey)) {
+      return libraryByRatingKey.get(ratingKey);
+    }
+
+    const active = discoverConnection();
+
+    if (!active) {
+      return null;
+    }
+
+    let payload = null;
+    try {
+      const response = await fetch(`${active.origin}/library/metadata/${ratingKey}`, {
+        headers: { Accept: 'application/json', 'X-Plex-Token': active.token }
+      });
+
+      if (!response.ok) {
+        // A stale token is worth re-discovering on the next attempt.
+        if (response.status === 401 || response.status === 403) {
+          forgetConnection();
+        }
+        return null;
+      }
+
+      payload = await response.json();
+    } catch (error) {
+      return null;
+    }
+
+    const container = payload && payload.MediaContainer;
+    const metadata = container && Array.isArray(container.Metadata) ? container.Metadata[0] : null;
+    const sectionId = metadata ? metadata.librarySectionID : undefined;
+
+    if (sectionId === undefined || sectionId === null) {
+      return null;
+    }
+
+    const library = {
+      key: `${getMachineIdFromLocation()}:${sectionId}`,
+      name: typeof metadata.librarySectionTitle === 'string' ? metadata.librarySectionTitle : ''
+    };
+
+    libraryByRatingKey.set(ratingKey, library);
+    return library;
+  };
+
+  const applyLibrary = library => {
+    if (!library) {
+      return;
+    }
+
+    const changed = !currentLibrary || currentLibrary.key !== library.key || currentLibrary.name !== library.name;
+
+    currentLibrary = library;
+    writeSessionValue(CURRENT_LIBRARY_SESSION_KEY, library);
+
+    // Keep the stored label in step with a library that was renamed in Plex.
+    const saved = store.libraries[library.key];
+    if (saved && library.name && saved.name !== library.name) {
+      saved.name = library.name;
+      persistStore();
+    }
+
+    if (changed) {
+      syncStepToControls();
+    }
+  };
+
+  const refreshCurrentLibrary = () => {
+    const ratingKey = getRatingKeyFromLocation();
+
+    if (!ratingKey || pendingRatingKey === ratingKey) {
+      return;
+    }
+
+    const cached = libraryByRatingKey.get(ratingKey);
+
+    if (cached) {
+      applyLibrary(cached);
+      return;
+    }
+
+    pendingRatingKey = ratingKey;
+    syncStepToControls();
+
+    const settle = library => {
+      if (pendingRatingKey === ratingKey) {
+        pendingRatingKey = null;
+      }
+
+      // Drop a late response for an item that is no longer on screen.
+      if (getRatingKeyFromLocation() === ratingKey) {
+        applyLibrary(library);
+      }
+
+      syncStepToControls();
+    };
+
+    fetchLibraryForRatingKey(ratingKey)
+      .then(settle)
+      .catch(() => settle(null));
+  };
+
+  const getLibraryDisplayName = () => {
+    if (currentLibrary) {
+      return currentLibrary.name || `Library ${currentLibrary.key.split(':').pop()}`;
+    }
+
+    return pendingRatingKey ? 'checking…' : 'not detected';
+  };
+
+  // ---------------------------------------------------------------------------
+  // Step resolution
+  // ---------------------------------------------------------------------------
+  const getActiveStep = () => {
+    if (currentLibrary) {
+      const saved = store.libraries[currentLibrary.key];
+      // A library we have not seen before starts at the default step.
+      return saved && isValidStep(saved.step) ? saved.step : DEFAULT_STEP;
+    }
+
+    return isValidStep(store.lastStep) ? store.lastStep : DEFAULT_STEP;
+  };
+
+  const saveActiveStep = step => {
+    store.lastStep = step;
+
+    if (currentLibrary) {
+      store.libraries[currentLibrary.key] = { name: currentLibrary.name, step };
+    }
+
+    persistStore();
+  };
+
+  const getDecimalPlaces = value => {
+    const text = String(value);
+    const separatorIndex = text.indexOf('.');
+    return separatorIndex === -1 ? 0 : text.length - separatorIndex - 1;
+  };
+
+  const snapSpeed = (value, step) => {
+    const numeric = Number(value);
+
+    if (!isFinite(numeric)) {
+      return SPEED_MIN;
+    }
+
+    const slots = Math.round((numeric - SPEED_MIN) / step);
+    const snapped = Number((SPEED_MIN + slots * step).toFixed(6));
+    return Math.min(SPEED_MAX, Math.max(SPEED_MIN, snapped));
+  };
+
+  const formatSpeed = (value, step) => {
+    return Number(value.toFixed(Math.max(getDecimalPlaces(step), 0))).toString();
+  };
+
+  // ---------------------------------------------------------------------------
+  // UI
+  // ---------------------------------------------------------------------------
+  let rangeInput = null;
+  let speedLabel = null;
+  let stepInput = null;
+  let libraryValueLabel = null;
+
+  const applySpeed = speed => {
+    const targetVideo = document.querySelector('video');
+    const step = getActiveStep();
+    const snapped = snapSpeed(speed, step);
+
+    if (rangeInput) {
+      rangeInput.value = snapped;
+    }
+
+    if (speedLabel) {
+      speedLabel.textContent = `${formatSpeed(snapped, step)}x`;
+    }
+
+    if (targetVideo) {
+      targetVideo.playbackRate = snapped;
+    }
+
+    return snapped;
+  };
+
+  // Re-applies the active step to the slider and re-snaps the current speed onto
+  // the new grid.
+  const syncStepToControls = () => {
+    const step = getActiveStep();
+
+    if (stepInput && document.activeElement !== stepInput) {
+      stepInput.value = step;
+    }
+
+    if (libraryValueLabel) {
+      libraryValueLabel.textContent = getLibraryDisplayName();
+    }
+
+    if (!rangeInput) {
+      return;
+    }
+
+    rangeInput.step = step;
+    applySpeed(rangeInput.value);
+  };
+
+  const changeStep = nextStep => {
+    saveActiveStep(nextStep);
+    syncStepToControls();
+  };
+
+  const createStepControl = () => {
+    const container = document.createElement('div');
+    const label = document.createElement('label');
+
+    stepInput = document.createElement('input');
+    stepInput.type = 'number';
+    stepInput.id = 'speed-step-control';
+    stepInput.min = MIN_STEP;
+    stepInput.max = MAX_STEP;
+    stepInput.step = 0.05;
+    stepInput.value = getActiveStep();
+    stepInput.style.width = '64px';
+    stepInput.style.margin = '0';
+    stepInput.style.padding = '2px 4px';
+    stepInput.style.color = 'inherit';
+    stepInput.style.background = 'rgba(255, 255, 255, 0.08)';
+    stepInput.style.border = '1px solid rgba(255, 255, 255, 0.25)';
+    stepInput.style.borderRadius = '4px';
+
+    label.htmlFor = stepInput.id;
+    label.innerText = 'Step';
+    label.style.cursor = 'pointer';
+
+    stepInput.addEventListener('input', () => {
+      const parsed = Number(stepInput.value);
+
+      // Ignore half-typed values such as "0." and keep the last valid step.
+      if (isValidStep(parsed)) {
+        changeStep(parsed);
+      }
+    });
+
+    // Normalise whatever is left in the field once editing finishes.
+    stepInput.addEventListener('change', () => {
+      const parsed = Number(stepInput.value);
+      const nextStep = isValidStep(parsed) ? parsed : getActiveStep();
+      stepInput.value = nextStep;
+      changeStep(nextStep);
+    });
+
+    // Plex has its own single-key shortcuts; keep them out of this field.
+    stepInput.addEventListener('keydown', event => event.stopPropagation());
+    stepInput.addEventListener('keypress', event => event.stopPropagation());
+
+    container.style.display = 'flex';
+    container.style.alignItems = 'center';
+    container.style.gap = '6px';
+    container.style.justifyContent = 'space-between';
+    container.style.whiteSpace = 'nowrap';
+
+    container.appendChild(label);
+    container.appendChild(stepInput);
+
+    return container;
+  };
+
+  const createLibraryRow = () => {
+    const container = document.createElement('div');
+    const label = document.createElement('span');
+
+    libraryValueLabel = document.createElement('span');
+    libraryValueLabel.textContent = getLibraryDisplayName();
+    libraryValueLabel.style.opacity = '0.85';
+    libraryValueLabel.style.maxWidth = '140px';
+    libraryValueLabel.style.overflow = 'hidden';
+    libraryValueLabel.style.textOverflow = 'ellipsis';
+
+    label.innerText = 'Library';
+
+    container.style.display = 'flex';
+    container.style.alignItems = 'center';
+    container.style.gap = '10px';
+    container.style.justifyContent = 'space-between';
+    container.style.whiteSpace = 'nowrap';
+    container.style.fontSize = '12px';
+    container.style.opacity = '0.8';
+
+    container.appendChild(label);
+    container.appendChild(libraryValueLabel);
+
+    return container;
+  };
+
+  const createDivider = () => {
+    const divider = document.createElement('div');
+    divider.style.height = '1px';
+    divider.style.background = 'rgba(255, 255, 255, 0.15)';
+    divider.style.margin = '2px 0';
+    return divider;
   };
 
   // Add speed slider controls
@@ -43,6 +599,8 @@
       return;
     }
 
+    refreshCurrentLibrary();
+
     const addedFeatureContainer = document.createElement('div');
     addedFeatureContainer.style.padding = '0px 5px';
     addedFeatureContainer.style.display = 'flex';
@@ -51,22 +609,25 @@
     addedFeatureContainer.style.position = 'relative';
     controlContainer.appendChild(addedFeatureContainer);
 
-    const rangeInput = document.createElement('input');
-    const speedLabel = document.createElement('label');
+    const step = getActiveStep();
+
+    rangeInput = document.createElement('input');
+    speedLabel = document.createElement('label');
+
     const settingsPanel = createSettingsPanel();
     const settingsButton = createSettingsButton(settingsPanel);
 
     rangeInput.id = 'speed-control';
     rangeInput.type = 'range';
-    rangeInput.min = 1;
-    rangeInput.max = 10;
-    rangeInput.value = targetVideo.playbackRate;
+    rangeInput.min = SPEED_MIN;
+    rangeInput.max = SPEED_MAX;
+    rangeInput.step = step;
+    rangeInput.value = snapSpeed(targetVideo.playbackRate, step);
     rangeInput.style.width = '96px';
-    speedLabel.textContent = `${targetVideo.playbackRate}x`;
+    speedLabel.textContent = `${formatSpeed(snapSpeed(targetVideo.playbackRate, step), step)}x`;
 
     rangeInput.addEventListener('input', () => {
-      speedLabel.textContent = `${rangeInput.value}x`;
-      targetVideo.playbackRate = rangeInput.value;
+      applySpeed(rangeInput.value);
     });
 
     // Create and append the skip intro checkbox
@@ -86,6 +647,10 @@
       SETTINGS_DATASET_KEYS.skipCreditsEnabled
     );
     settingsPanel.appendChild(skipCreditsCheckbox);
+
+    settingsPanel.appendChild(createDivider());
+    settingsPanel.appendChild(createStepControl());
+    settingsPanel.appendChild(createLibraryRow());
 
     addedFeatureContainer.appendChild(speedLabel);
     addedFeatureContainer.appendChild(rangeInput);
@@ -138,6 +703,10 @@
     panel.style.border = '1px solid rgba(255, 255, 255, 0.18)';
     panel.style.boxShadow = '0 8px 24px rgba(0, 0, 0, 0.35)';
     panel.style.zIndex = '9999';
+
+    // Clicks inside the panel should not reach the player underneath.
+    panel.addEventListener('click', event => event.stopPropagation());
+
     return panel;
   };
 
@@ -145,6 +714,11 @@
     const setPanelOpen = isOpen => {
       settingsPanel.style.display = isOpen ? 'flex' : 'none';
       button.setAttribute('aria-expanded', String(isOpen));
+
+      if (isOpen) {
+        refreshCurrentLibrary();
+        syncStepToControls();
+      }
     };
 
     const button = document.createElement('button');
@@ -209,8 +783,26 @@
     bootObserver.observe(document.documentElement, { childList: true, subtree: true });
   }
 
-  // Speed controls with number input
+  refreshCurrentLibrary();
+
+  window.addEventListener('hashchange', refreshCurrentLibrary);
+
+  // Speed controls with number input: key N selects the Nth slider position, so
+  // the step setting decides how far apart those speeds are.
+  const isEditableTarget = target => {
+    if (!target || !target.tagName) {
+      return false;
+    }
+
+    const tagName = target.tagName.toUpperCase();
+    return tagName === 'INPUT' || tagName === 'TEXTAREA' || tagName === 'SELECT' || target.isContentEditable === true;
+  };
+
   const handleKeyPress = event => {
+    if (isEditableTarget(event.target)) {
+      return;
+    }
+
     const targetController = document.getElementById('speed-control');
     const targetVideo = document.querySelector('video');
 
@@ -218,13 +810,13 @@
       return;
     }
 
-    const speeds = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
-    const speedIndex = speeds.findIndex(speed => speed.toString() === event.key);
+    const slot = Number(event.key);
 
-    if (speedIndex >= 0) {
-      targetController.value = speeds[speedIndex];
-      targetVideo.playbackRate = speeds[speedIndex];
+    if (!Number.isInteger(slot) || slot < 1 || slot > HOTKEY_SLOT_COUNT) {
+      return;
     }
+
+    applySpeed(SPEED_MIN + (slot - 1) * getActiveStep());
   };
 
   window.addEventListener('keypress', handleKeyPress);
